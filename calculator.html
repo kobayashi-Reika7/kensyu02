@@ -153,14 +153,8 @@
     // 計算結果を四捨五入し、小数点以下最大10桁で表示用に整形
     function formatResult(num) {
       if (num === 'Error' || typeof num !== 'number' || !isFinite(num)) return String(num);
-      const rounded = Math.round(num * 1e10) / 1e10;
-      let str = String(rounded);
-      if (str.includes('.')) {
-        const parts = str.split('.');
-        const decimals = parts[1].slice(0, 10).replace(/0+$/, '');
-        str = decimals ? parts[0] + '.' + decimals : parts[0];
-      }
-      return str;
+      const fixed = num.toFixed(10);
+      return fixed.replace(/0+$/, '').replace(/\.$/, '');
     }
 
     // 表示の末尾の数値を newStr に置換。末尾に数値がなければ append
