@@ -29,7 +29,7 @@
       border: 1px solid #e5e7eb;
     }
 
-    /* 表示欄：上部配置・右寄せ（改行を有効にするため pre-wrap） */
+    /* 表示欄：1行のみ・上部配置・右寄せ（実機電卓同様） */
     .display {
       width: 100%;
       min-height: 3.5rem;
@@ -43,8 +43,8 @@
       box-sizing: border-box;
       font-variant-numeric: tabular-nums;
       border: 2px solid #374151;
-      white-space: pre-wrap;
-      word-break: break-all;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     /* ボタンエリア：4列×5行のCSS Grid */
@@ -165,9 +165,9 @@
 
   <script>
     /**
-     * 電卓アプリ（初心者向け・学習用）
-     * 記号統一：±・×・÷・−
-     * 演算子ボタンが押されない限り前回の演算子を保持
+     * 電卓アプリ（実機電卓同様の操作感）
+     * 表示は1行のみ、計算履歴・改行なし
+     * 結果確定後：数値入力→初期化して新規、演算子入力→前回結果を被演算数に
      */
 
     const displayElement = document.getElementById('display');
@@ -205,17 +205,17 @@
         return;
       }
 
-      // 計算結果表示中の数値入力：改行し、新しい計算として入力を開始
+      // 結果確定後の数値入力：表示を初期化して新規入力を開始
       if (isResultDisplayed()) {
-        if (currentOperator === null) return;
         if (num === '.') {
-          displayExpression = displayExpression + '\n' + currentValue + ' ' + toDisplayOperator(currentOperator) + ' 0.';
+          displayExpression = '0.';
           currentValue = '0.';
         } else {
-          displayExpression = displayExpression + '\n' + currentValue + ' ' + toDisplayOperator(currentOperator) + ' ';
-          currentValue = num === '0' ? '0' : num;
-          displayExpression += currentValue;
+          displayExpression = num === '0' ? '0' : num;
+          currentValue = displayExpression;
         }
+        previousValue = null;
+        currentOperator = null;
         updateDisplay();
         return;
       }
@@ -375,10 +375,10 @@
         previousValue = null;
         currentOperator = null;
       } else {
-        // 結果を被演算数として保持、演算子も保持
-        // 「=」後に数値入力された場合の新しい計算行で使用する
+        // 結果を保持（演算子入力時に被演算数として使用）
         previousValue = parseFloat(resultStr);
-        // currentOperator は保持（数値入力時に「前回の演算子」として使う）
+        // 数値入力時は新規扱いのため演算子はクリア
+        currentOperator = null;
       }
 
       updateDisplay();
