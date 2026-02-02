@@ -158,14 +158,31 @@
     // 選択中の演算子（+, -, *, /）
     let currentOperator = null;
 
-    // 表示エリアを更新する（即座に反映するため同期的に実行）
+    // 「=」押下後の計算式表示（例: "12 + 34 = 46"）
+    let lastFullExpression = null;
+
+    // 内部の演算子記号を表示用（×、÷）に変換する
+    function operatorToDisplay(op) {
+      var map = { '+': '+', '-': '−', '*': '×', '/': '÷' };
+      return map[op] || op;
+    }
+
+    // 表示エリアを更新する（演算子・=を含む計算式を表示）
     function updateDisplay() {
-      displayElement.textContent = currentValue;
+      var text;
+      if (lastFullExpression !== null) {
+        text = lastFullExpression;
+      } else if (previousValue !== null && currentOperator !== null) {
+        text = previousValue + ' ' + operatorToDisplay(currentOperator) + ' ' + currentValue;
+      } else {
+        text = currentValue;
+      }
+      displayElement.textContent = text;
     }
 
     // 数値を入力する
     function inputNumber(num) {
-      // 先頭の0を除く（0の連続入力防止、ただし「0.5」などは許可）
+      lastFullExpression = null;  // 計算式表示をクリアして数値入力に切り替え
       if (currentValue === '0' && num !== '0') {
         currentValue = num;
       } else if (currentValue !== '0') {
@@ -176,12 +193,14 @@
 
     // 演算子を押したときの処理
     function inputOperator(operator) {
-      const num = parseFloat(currentValue);
+      lastFullExpression = null;  // 計算式表示をクリア
+      var num = parseFloat(currentValue);
 
       // 連続で演算子を押した場合は前の計算を先に実行
       if (previousValue !== null && currentOperator !== null) {
-        const result = calculate(previousValue, num, currentOperator);
+        var result = calculate(previousValue, num, currentOperator);
         if (result === 'Error') {
+          lastFullExpression = previousValue + ' ' + operatorToDisplay(currentOperator) + ' ' + currentValue + ' = Error';
           currentValue = 'Error';
           previousValue = null;
           currentOperator = null;
@@ -216,14 +235,16 @@
         return;
       }
 
-      const num = parseFloat(currentValue);
-      const result = calculate(previousValue, num, currentOperator);
+      var num = parseFloat(currentValue);
+      var result = calculate(previousValue, num, currentOperator);
 
-      // 結果を表示用に整形（エラーの場合はそのまま、小数は適度に丸める）
-      currentValue = result === 'Error' ? 'Error' : String(
+      // 計算式を表示用に保存（例: "12 + 34 = 46"）
+      var resultStr = result === 'Error' ? 'Error' : String(
         Number.isInteger(result) ? result : Math.round(result * 1000000) / 1000000
       );
+      lastFullExpression = previousValue + ' ' + operatorToDisplay(currentOperator) + ' ' + currentValue + ' = ' + resultStr;
 
+      currentValue = resultStr;
       previousValue = null;
       currentOperator = null;
       updateDisplay();
@@ -234,6 +255,7 @@
       currentValue = '0';
       previousValue = null;
       currentOperator = null;
+      lastFullExpression = null;
       updateDisplay();
     }
 
