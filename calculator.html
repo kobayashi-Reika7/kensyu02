@@ -198,10 +198,17 @@
         return;
       }
 
+      // 「=」押下後は数値入力を新規として扱う（前回の結果には連結しない）
       if (displayExpression.endsWith('=')) {
-        displayExpression = currentValue + ' ' + toDisplayOperator(currentOperator) + ' ';
-        currentValue = num === '0' ? '0' : num;
-        displayExpression += currentValue;
+        if (num === '.') {
+          displayExpression = '0.';
+          currentValue = '0.';
+        } else {
+          displayExpression = num === '0' ? '0' : num;
+          currentValue = displayExpression;
+        }
+        previousValue = null;
+        currentOperator = null;
         updateDisplay();
         return;
       }
@@ -356,7 +363,10 @@
         previousValue = null;
         currentOperator = null;
       } else {
+        // 結果を保持（演算子入力時に被演算数として使用するため）
         previousValue = parseFloat(resultStr);
+        // 数値入力時は新規扱いにするため演算子はクリア
+        currentOperator = null;
       }
 
       updateDisplay();
