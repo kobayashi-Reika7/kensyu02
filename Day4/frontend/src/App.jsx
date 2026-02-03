@@ -1,118 +1,177 @@
 /**
- * App: 画面の状態（state）と Firestore の橋渡し
- *
- * 【state の役割】
- * - 画面上の「今表示しているタスク一覧」を保持する（UI は常にこの state を元に描画）
- * - ユーザー操作に応じてすぐ UI を更新するため、ローカルで一時的に持つ
- *
- * 【Firestore の役割】
- * - データの永続化（リロードしても消えない）。正として扱い、追加・取得・削除はすべて Firestore 経由
- * - 操作完了後に getTodos() で再取得し、setTasks で state を更新する
- *
- * 【自動更新（リロード）でも消えない理由】
- * - 初回マウント時およびリロード時に useEffect で getTodos() を実行し、Firestore から取得した内容で setTasks する
- * - 表示は常に state を元にするため、Firestore 取得完了後の state で安定する
- *
- * 【表示ズレの原因（Firestore 対応後に起きていたこと）】
- * 1. 並び順: getTodos() は orderBy なしで取得するため、Firestore の返却順は保証されない。
- * 2. 表示タイミング: 追加後に setInputValue('') を先に実行すると、一覧の再取得が終わる前に入力欄だけ空になりズレる。
+ * App: 全体の状態保持と Firestore 連携
+ * VERIFICATION.md の確認項目（タスク追加・完了・編集・リスト・リロード等）に沿った構成
  */
-import React, { useState, useEffect } from 'react';
-import { addTodo, getTodos, deleteTodo } from './services/firestore';
-import TodoList from './components/TodoList';
-
-/** リストの初期状態を「デフォルト」に固定する。本アプリはこの1リストのみを使用する */
-const DEFAULT_LIST_LABEL = 'デフォルト';
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  getLists,
+  getTasks,
+  addTask,
+  updateTask,
+  deleteTask,
+  addList,
+  deleteList,
+} from './services/firestore';
+import { computeCounts, sortTasksByCreatedAt } from './utils/taskUtils';
+import {
+  DEFAULT_LIST_NAME,
+  PROMPT_NEW_LIST_NAME,
+  ALERT_CANNOT_DELETE_DEFAULT_LIST,
+  CONFIRM_DELETE_LIST,
+  ERROR_LOAD_FAILED,
+  ERROR_LIST_NOT_READY,
+  ERROR_TASKS_FETCH,
+  ERROR_TASKS_ADD,
+  ERROR_TASKS_UPDATE,
+  ERROR_TASKS_DELETE,
+  ERROR_LISTS_FETCH,
+  ERROR_LISTS_ADD,
+  ERROR_LISTS_DELETE,
+} from './constants/messages';
+import Counter from './components/Counter';
+import ListSelector from './components/ListSelector';
+import TaskForm from './components/TaskForm';
+import TaskList from './components/TaskList';
 
 function App() {
-  // 初期 state の設計意図:
-  // - tasks: [] … 表示するタスク一覧。Firestore 取得前に空、取得後に setTasks で上書き
-  // - inputValue: '' … 入力欄。追加後に空に戻す
-  // - loading: true … 初回は「読み込み中」表示。loadTodos の finally で false に
-  // - error: null … エラー時のみメッセージを表示
   const [tasks, setTasks] = useState([]);
-  const [inputValue, setInputValue] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [lists, setLists] = useState([]);
+  const [currentListId, setCurrentListId] = useState('');
   const [error, setError] = useState(null);
 
-  /**
-   * Firestore から一覧を取得し、state を更新する。
-   * 並び順を安定させるため、取得後に createdAt の新しい順でソートしてから setTasks する。
-   */
-  const loadTodos = async () => {
-    try {
-      setError(null);
-      const list = await getTodos();
-      // 並び順を安定させる: createdAt の新しい順（ローカル版と同じ「新規が上」）
-      const sorted = [...list].sort((a, b) => {
-        const tA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt ?? 0);
-        const tB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt ?? 0);
-        return tB - tA;
-      });
-      setTasks(sorted);
-    } catch (e) {
-      setError('タスクの取得に失敗しました: ' + e.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const defaultListId = lists.find((l) => l.name === DEFAULT_LIST_NAME)?.id ?? lists[0]?.id ?? '';
 
-  // 初回マウント時およびリロード時に Firestore から取得する。依存配列が空なのでマウント時のみ実行。
-  // リロードしてもこの useEffect が走るため、getTodos() → setTasks でタスクが復元され消えない。
-  useEffect(() => {
-    loadTodos();
+  const loadTasks = useCallback(
+    (defaultListIdParam) => {
+      const fallback = defaultListIdParam ?? defaultListId;
+      setError(null);
+      return getTasks(fallback)
+        .then((list) => setTasks(sortTasksByCreatedAt(list)))
+        .catch((e) => setError(ERROR_TASKS_FETCH + ': ' + e.message));
+    },
+    [defaultListId]
+  );
+
+  const loadLists = useCallback(() => {
+    setError(null);
+    return getLists()
+      .then((data) => {
+        setLists(data);
+        return data;
+      })
+      .catch((e) => {
+        setError(ERROR_LISTS_FETCH + ': ' + e.message);
+        return [];
+      });
   }, []);
 
-  // タスク追加: add → Firestore 保存 → 再取得 → setState の流れを await で保証する。
-  // 1. await addTodo(title) で Firestore に保存完了を待つ
-  // 2. await loadTodos() で再取得し setTasks が完了するまで待つ
-  // 3. その後に setInputValue('') で入力欄を空にする（表示のズレを防ぐ）
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    const title = inputValue.trim();
-    if (!title) return;
-    try {
-      setError(null);
-      await addTodo(title);
-      await loadTodos();
-      setInputValue('');
-    } catch (e) {
-      setError('タスクの追加に失敗しました: ' + e.message);
+  // 初回: リスト・タスクを取得。VERIFICATION「初回表示でマイリストが1件ある」を満たすため、
+  // リストが0件または「マイリスト」が無い場合は自動作成し、先頭に置く
+  useEffect(() => {
+    setError(null);
+    getLists()
+      .then((listData) => {
+        if (!Array.isArray(listData)) listData = [];
+        const hasDefaultList = listData.some((l) => l.name === DEFAULT_LIST_NAME);
+        if (listData.length === 0 || !hasDefaultList) {
+          return addList(DEFAULT_LIST_NAME).then((created) => {
+            const defaultEntry = { id: created.id, name: created.name };
+            return listData.length === 0 ? [defaultEntry] : [defaultEntry, ...listData];
+          });
+        }
+        return listData;
+      })
+      .then((listData) => {
+        setLists(listData);
+        const firstId = listData[0]?.id ?? '';
+        setCurrentListId(firstId);
+        return getTasks(firstId);
+      })
+      .then((taskList) => setTasks(sortTasksByCreatedAt(taskList)))
+      .catch((e) => setError(ERROR_LOAD_FAILED + ': ' + e.message));
+  }, []);
+
+  const handleAddTask = (title) => {
+    const listId = currentListId || defaultListId;
+    if (!listId) {
+      setError(ERROR_LIST_NOT_READY);
+      return;
     }
+    setError(null);
+    addTask({
+      title,
+      list_id: listId,
+      is_completed: false,
+      is_favorite: false,
+      due_date: null,
+      memo: '',
+      time: 0,
+    })
+      .then(() => loadTasks(listId))
+      .catch((e) => setError(ERROR_TASKS_ADD + ': ' + e.message));
   };
 
-  const handleDelete = async (id) => {
-    try {
-      setError(null);
-      await deleteTodo(id);
-      await loadTodos();
-    } catch (e) {
-      setError('タスクの削除に失敗しました: ' + e.message);
-    }
+  const handleUpdateTask = (id, data) => {
+    const listId = currentListId || defaultListId;
+    setError(null);
+    updateTask(id, data)
+      .then(() => loadTasks(listId))
+      .catch((e) => setError(ERROR_TASKS_UPDATE + ': ' + e.message));
   };
+
+  const handleDeleteTask = (id) => {
+    const listId = currentListId || defaultListId;
+    setError(null);
+    deleteTask(id)
+      .then(() => loadTasks(listId))
+      .catch((e) => setError(ERROR_TASKS_DELETE + ': ' + e.message));
+  };
+
+  const handleAddList = () => {
+    const name = window.prompt(PROMPT_NEW_LIST_NAME);
+    if (!name?.trim()) return;
+    setError(null);
+    addList(name.trim())
+      .then((created) => loadLists().then(() => setCurrentListId(created.id)))
+      .catch((e) => setError(ERROR_LISTS_ADD + ': ' + e.message));
+  };
+
+  const handleDeleteList = () => {
+    if (currentListId === defaultListId) {
+      window.alert(ALERT_CANNOT_DELETE_DEFAULT_LIST);
+      return;
+    }
+    if (!window.confirm(CONFIRM_DELETE_LIST)) return;
+    setError(null);
+    deleteList(currentListId, defaultListId)
+      .then(() => loadLists())
+      .then(() => loadTasks(defaultListId))
+      .then(() => setCurrentListId(defaultListId))
+      .catch((e) => setError(ERROR_LISTS_DELETE + ': ' + e.message));
+  };
+
+  const counts = computeCounts(tasks);
 
   return (
-    <div style={{ maxWidth: 400, margin: '2rem auto', padding: '0 1rem' }}>
-      <h1>ToDoアプリ (React + Firestore)</h1>
-      <p style={{ fontSize: '0.9rem', color: '#666' }}>リスト: {DEFAULT_LIST_LABEL}</p>
-      {error && <p style={{ color: '#c33' }}>{error}</p>}
-
-      <form onSubmit={handleSubmit} style={{ marginBottom: '1rem' }}>
-        <input
-          type="text"
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          placeholder="新しいタスク"
-          aria-label="新しいタスクの入力"
-        />
-        <button type="submit">追加</button>
-      </form>
-
-      {loading ? (
-        <p>読み込み中...</p>
-      ) : (
-        <TodoList tasks={tasks} onDelete={handleDelete} />
-      )}
+    <div className="app-container">
+      <h1>ToDoアプリ</h1>
+      {error && <p className="app-error">{error}</p>}
+      <Counter counts={counts} />
+      <ListSelector
+        lists={lists}
+        currentListId={currentListId}
+        defaultListId={defaultListId}
+        onSelect={setCurrentListId}
+        onAdd={handleAddList}
+        onDelete={handleDeleteList}
+      />
+      <TaskForm onAdd={handleAddTask} disabled={!currentListId} />
+      <TaskList
+        tasks={tasks}
+        currentListId={currentListId}
+        onUpdate={handleUpdateTask}
+        onDelete={handleDeleteTask}
+      />
     </div>
   );
 }
