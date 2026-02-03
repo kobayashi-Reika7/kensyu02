@@ -28,6 +28,7 @@ function App() {
   const [inputTitle, setInputTitle] = useState('');
 
   const [error, setError] = useState(null);
+  const [firestoreError, setFirestoreError] = useState(null);
 
   /**
    * 【初回表示 + リアルタイム更新】subscribeTodos（onSnapshot）
@@ -42,11 +43,16 @@ function App() {
    * これにより「別タブで追加 → 即反映」が実現する。
    */
   useEffect(() => {
-    const unsubscribe = subscribeTodos((data) => {
-      setTodos(data);
-    });
+    const unsubscribe = subscribeTodos(
+      (data) => {
+        setFirestoreError(null);
+        setTodos(data);
+      },
+      (err) => {
+        setFirestoreError(err?.message || 'Firestore の読み込みに失敗しました');
+      }
+    );
 
-    // cleanup: タブを閉じる等でコンポーネントが unmount されたら監視を解除
     return () => {
       unsubscribe();
     };
@@ -90,7 +96,9 @@ function App() {
       </form>
 
       {/* エラー表示 */}
-      {error && <p className="error">{error}</p>}
+      {(error || firestoreError) && (
+        <p className="error">{error || firestoreError}</p>
+      )}
 
       {/* ToDo 一覧（新しい順で表示・リアルタイム更新） */}
       <ul className="todo-list">

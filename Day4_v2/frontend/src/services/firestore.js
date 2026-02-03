@@ -10,8 +10,6 @@ import {
   collection,
   addDoc,
   onSnapshot,
-  query,
-  orderBy,
 } from 'firebase/firestore';
 import { db } from '../firebase/firebase.js';
 
@@ -50,19 +48,17 @@ export async function addTodoToDB(title) {
  * onSnapshot は Promise を返さず、同期的に unsubscribe 関数を返す。
  * データ取得はコールバックで非同期に届くため、await する対象がない。
  *
- * @param {function(todos: Array<{id, title, createdAt}>): void} callback
+ * @param {function(todos: Array<{id, title, createdAt}>): void} callback - 成功時
+ * @param {function(error: Error): void} [onError] - エラー時（任意）
  * @returns {function} unsubscribe - useEffect の cleanup で呼ぶ
  */
-export function subscribeTodos(callback) {
+export function subscribeTodos(callback, onError) {
   const todosRef = collection(db, COLLECTION_NAME);
 
-  // createdAt の降順（新しい順）でソート
-  const q = query(todosRef, orderBy('createdAt', 'desc'));
-
-  // onSnapshot: リスナーを登録。データ変更のたびに第2引数のコールバックが呼ばれる
-  // 戻り値は unsubscribe 関数（呼ぶと監視を解除）
+  // orderBy を使わず単純にコレクションを取得（インデックス不要で確実に動作）
+  // ソートは取得後にクライアント側で実施
   const unsubscribe = onSnapshot(
-    q,
+    todosRef,
     (querySnapshot) => {
       const todos = [];
       querySnapshot.forEach((doc) => {
@@ -70,14 +66,16 @@ export function subscribeTodos(callback) {
         todos.push({
           id: doc.id,
           title: data.title || '',
-          createdAt: data.createdAt?.toDate?.() || new Date(),
+          createdAt: data.createdAt?.toDate?.() || new Date(0),
         });
       });
+      // クライアント側で createdAt の降順（新しい順）にソート
+      todos.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       callback(todos);
     },
-    (error) => {
-      // エラー時も callback を呼んで空配列を渡すか、エラーを伝える
-      console.error('Firestore 監視エラー:', error);
+    (err) => {
+      console.error('Firestore 監視エラー:', err);
+      if (onError) onError(err);
       callback([]);
     }
   );
