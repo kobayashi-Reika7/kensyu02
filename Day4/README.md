@@ -10,6 +10,17 @@ React（Vite）と Firebase Firestore を接続した学習用 ToDo アプリで
 - Firestore（NoSQL）
 - 状態管理は useState / useEffect のみ
 
+## React で Firebase を使う準備
+
+詳細な手順は **`frontend/SETUP_FIREBASE.md`** を参照してください。
+
+- 依存関係: `npm install`（Firebase SDK は package.json に含まれています）
+- Firebase プロジェクト作成 → Web アプリ追加 → 設定値を控える
+- Firestore データベースをテストモードで作成
+- `.env.example` を `.env` にコピーし、Firebase の設定値を入れる
+
+**注意（重要）**: `.env` は GitHub に push しない。`.env.example` は push して OK。設定後は `npm run dev` を再起動すること（反映のため）。
+
 ## 環境構築手順
 
 ### 1. Node.js
@@ -78,6 +89,10 @@ Day4/frontend/
 1. **初回表示**: `useEffect` で `getTodos()` → Firestore から取得 → `setTasks` で state 更新 → 画面に表示。
 2. **追加**: フォーム送信 → `addTodo(title)` で Firestore に保存 → `getTodos()` で再取得 → state 更新。
 3. **削除**: 削除ボタン → `deleteTodo(id)` で Firestore から削除 → `getTodos()` で再取得 → state 更新。
+
+## クラウドデプロイ
+
+フロントを Vercel / Netlify へ、バックエンド（任意）を Railway / Render などへデプロイする手順は **`docs/DEPLOYMENT.md`** を参照してください。環境変数（CORS・API ベース URL など）の設定も記載しています。
 
 ---
 
