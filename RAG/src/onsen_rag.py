@@ -398,7 +398,8 @@ class OnsenRAG:
             content = doc.page_content.replace("\n", " ")
             preview = content[:100] + "..." \
                 if len(content) > 100 else content
-            print(f"  [{i+1}] {preview}")
+            safe_preview = preview.encode("ascii", errors="replace").decode()
+            print(f"  [{i+1}] {safe_preview}")
 
         return results
 
