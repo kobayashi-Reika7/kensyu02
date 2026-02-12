@@ -1,0 +1,476 @@
+"""
+OnsenRAG - 温泉特化RAGシステム
+==================================
+温泉テキストデータ（data/onsen_knowledge.txt）を読み込み、
+温泉に関する質問に対してRAGで回答を生成する。
+
+このクラスの特徴：
+- 温泉テキストを「■」見出し単位で意味的に分割
+- 日本語に最適化されたEmbeddingモデルとプロンプト
+- 評価用の検索結果取得メソッド付き
+
+RAG教材としてのポイント：
+- 情報が分散している → 検索が効く
+- 条件付き質問が多い → RAG必須
+- 嘘をつくとすぐ分かる → 精度評価しやすい
+"""
+
+import os
+import json
+from dotenv import load_dotenv
+from langchain_community.vectorstores import Chroma
+from src.text_splitter_utils import (
+    create_token_text_splitter,
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_CHUNK_OVERLAP,
+)
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_classic.chains import RetrievalQA
+from langchain_core.prompts import PromptTemplate
+from langchain_core.documents import Document
+
+# .envファイルから環境変数を読み込む
+load_dotenv()
+
+# データファイルのパス（プロジェクトルートからの相対パス）
+DEFAULT_DATA_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "data",
+    "onsen_knowledge.txt"
+)
+
+# サンプル質問ファイルのパス
+DEFAULT_QUESTIONS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "data",
+    "sample_questions.json"
+)
+
+# JSONチャンクファイルのパス（草津温泉ガイド等の構造化データ）
+DEFAULT_KUSATSU_CHUNKS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "data",
+    "kusatsu_chunks.json"
+)
+
+# 複数チャンクファイル（草津・箱根・別府・有馬など）を一括読み込みする際のデフォルト
+DEFAULT_JSON_CHUNK_PATHS = [
+    DEFAULT_KUSATSU_CHUNKS_PATH,
+    os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "data",
+        "hakone_chunks.json"
+    ),
+    os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "data",
+        "beppu_chunks.json"
+    ),
+    os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "data",
+        "arima_chunks.json"
+    ),
+]
+
+
+class OnsenRAG:
+    """
+    温泉情報に特化したRAGシステム
+
+    温泉テキストデータを「■」見出し単位で意味的に分割し、
+    質問に対して関連するチャンクを検索してLLMで回答を生成する。
+
+    なぜ「■」で分割するのか：
+    - テキストが見出し（■）ごとにまとまった意味を持つ
+    - 機械的な文字数分割より、意味単位の分割のほうが精度が高い
+    - 「冬におすすめの温泉地は？」→「■ 季節ごとの楽しみ方」がヒットしやすい
+
+    使用例:
+        rag = OnsenRAG()
+        rag.load_data()
+        result = rag.query("草津温泉の特徴は？")
+        print(result["result"])
+    """
+
+    def __init__(
+        self,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+    ):
+        """
+        OnsenRAGの初期化
+
+        Args:
+            chunk_size: チャンクの最大トークン数（デフォルト600、general プリセット）
+            chunk_overlap: チャンク間の重複トークン数（デフォルト75）
+
+        トークンベース管理の理由：
+        - LLMのコンテキスト制限はトークン数で表現される
+        - 文字数より正確なチャンクサイズ制御が可能
+        - 日本語は1文字≒2〜3トークン程度のため、トークン単位が適切
+        """
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+
+        # 日本語対応Embeddingモデル
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="intfloat/multilingual-e5-base"
+        )
+
+        # ベクトルストア
+        self.vectorstore = None
+
+        # LLMの初期化（Gemini優先 → Groq → OpenAI）
+        self.llm = self._init_llm()
+
+    def _init_llm(self):
+        """
+        LLMを初期化する。
+        Google API キーがあれば Gemini（無料枠あり・高性能）を使用し、
+        なければ Groq → OpenAI の順にフォールバックする。
+
+        Geminiの利点:
+        - 無料枠あり（1分あたり15リクエスト）
+        - 日本語性能が高い
+        - gemini-2.0-flash は高速かつ高精度
+        """
+        google_key = os.getenv("GOOGLE_API_KEY", "")
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+
+        if google_key and not google_key.startswith("your_"):
+            try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                llm = ChatGoogleGenerativeAI(
+                    model="gemini-2.0-flash",
+                    temperature=0,
+                    google_api_key=google_key
+                )
+                # 接続テスト（クォータ切れ等を早期検出）
+                llm.invoke("test")
+                print("  LLM: Gemini (gemini-2.0-flash) を使用")
+                return llm
+            except Exception as e:
+                print(f"  [WARN] Gemini connection error (fallback): {e}")
+        if groq_key and not groq_key.startswith("gsk_your"):
+            from langchain_groq import ChatGroq
+            print("  LLM: Groq (llama-3.3-70b-versatile) を使用")
+            return ChatGroq(
+                model="llama-3.3-70b-versatile",
+                temperature=0,
+                groq_api_key=groq_key
+            )
+        elif openai_key and not openai_key.startswith("sk-your"):
+            from langchain_openai import OpenAI
+            print("  LLM: OpenAI を使用")
+            return OpenAI(
+                temperature=0,
+                openai_api_key=openai_key
+            )
+        else:
+            raise ValueError(
+                "LLM APIキーが未設定です。\n"
+                ".envファイルに GOOGLE_API_KEY, GROQ_API_KEY, "
+                "または OPENAI_API_KEY を設定してください。"
+            )
+
+    def load_data(self, data_path: str = None) -> None:
+        """
+        温泉テキストデータを読み込み、ベクトルDBに保存
+
+        「■」見出しを考慮したセパレータで分割することで、
+        意味的なまとまりを保ったチャンクを作成する。
+
+        Args:
+            data_path: テキストファイルのパス
+                      省略時は data/onsen_knowledge.txt を使用
+        """
+        file_path = data_path or DEFAULT_DATA_PATH
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(
+                f"温泉データファイルが見つかりません: {file_path}\n"
+                "data/onsen_knowledge.txt を確認してください。"
+            )
+
+        # テキストファイルを読み込み
+        with open(file_path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        print(f"[LOAD] Onsen data loaded: {len(text)} chars")
+
+        # Documentオブジェクトに変換
+        document = Document(page_content=text)
+
+        # トークンベースのテキスト分割（400〜500 tokens、オーバーラップ10〜20%）
+        # separators の優先順位：
+        #   "■ "    → 見出し区切り（最も重要な意味の区切り）
+        #   "\n\n"  → 段落区切り
+        #   "\n"    → 改行
+        #   "。"    → 文末（日本語）
+        #   "、"    → 読点
+        #   " "     → スペース
+        #   ""      → 文字単位（最終手段）
+        text_splitter = create_token_text_splitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+        )
+        splits = text_splitter.split_documents([document])
+
+        print(f"[SPLIT] {len(splits)} chunks (chunk_size={self.chunk_size} tokens)")
+
+        # チャンク内容をプレビュー表示（デバッグ用）
+        for i, split in enumerate(splits):
+            preview = split.page_content[:60].replace("\n", " ")
+            safe_preview = preview.encode("ascii", errors="replace").decode()
+            print(f"  [{i+1}] {safe_preview}...")
+
+        # ベクトルDBに保存
+        self.vectorstore = Chroma.from_documents(
+            documents=splits,
+            embedding=self.embeddings
+        )
+
+        print(f"\n[OK] Vector DB saved")
+
+    def load_json_chunks(
+        self,
+        json_path: str | list[str] = None,
+    ) -> None:
+        """
+        JSON形式のチャンクデータを読み込み、Vector DBに格納する。
+
+        メタデータ付きの構造化チャンク（chunk_id, metadata, section, content）を
+        ChromaDBに保存。検索時はメタデータでフィルタリング可能。
+        chunk_idは全ファイルで一意になるよう連番で統一（chunk_001〜）。
+
+        Args:
+            json_path: JSONファイルのパス（単一またはリスト）
+                      省略時は data/kusatsu_chunks.json のみ使用
+                      複数指定時は DEFAULT_JSON_CHUNK_PATHS で草津・箱根を一括読み込み
+
+        使用例:
+            rag = OnsenRAG()
+            rag.load_json_chunks()  # 草津のみ
+            rag.load_json_chunks(DEFAULT_JSON_CHUNK_PATHS)  # 草津+箱根
+        """
+        paths = json_path if isinstance(json_path, list) else [json_path or DEFAULT_KUSATSU_CHUNKS_PATH]
+        all_chunks = []
+
+        for file_path in paths:
+            if not os.path.exists(file_path):
+                print(f"[SKIP] Not found: {file_path}")
+                continue
+            with open(file_path, "r", encoding="utf-8") as f:
+                chunks = json.load(f)
+            all_chunks.extend(chunks)
+
+        if not all_chunks:
+            raise FileNotFoundError(
+                "読み込めるJSONチャンクファイルがありません。\n"
+                "data/kusatsu_chunks.json, hakone_chunks.json, beppu_chunks.json, arima_chunks.json を確認してください。"
+            )
+
+        # ChromaDBのメタデータは str/int/float/bool のみ対応のため、
+        # tags/keywords, category, area（list）はカンマ区切り文字列に変換
+        def _to_str(val):
+            if isinstance(val, list):
+                return ",".join(str(v) for v in val)
+            return str(val) if val is not None else ""
+
+        documents = []
+        for chunk in all_chunks:
+            meta = chunk.get("metadata", {})
+            tags_raw = meta.get("tags") or meta.get("keywords", [])
+            tags_str = _to_str(tags_raw) if tags_raw else ""
+            doc_metadata = {
+                "chunk_id": chunk.get("chunk_id", ""),
+                "source": meta.get("source", ""),
+                "category": _to_str(meta.get("category", "")),
+                "section": chunk.get("section", ""),
+                "area": _to_str(meta.get("area", "")),
+                "tags": tags_str,
+            }
+            doc = Document(
+                page_content=chunk.get("content", ""),
+                metadata=doc_metadata
+            )
+            documents.append(doc)
+
+        print(f"[LOAD] JSON chunks loaded: {len(documents)}")
+
+        self.vectorstore = Chroma.from_documents(
+            documents=documents,
+            embedding=self.embeddings
+        )
+
+        print(f"[OK] Vector DB saved")
+
+    def query(self, question: str, k: int = 3) -> dict:
+        """
+        温泉に関する質問に対してRAGで回答を生成
+
+        Args:
+            question: 質問文（日本語）
+                     例: "冬におすすめの温泉地は？"
+            k: 検索結果の件数（デフォルト3件）
+
+        Returns:
+            dict: 回答結果
+                - "result": LLMが生成した回答テキスト
+        """
+        if self.vectorstore is None:
+            raise ValueError(
+                "データが未読み込みです。先にload_data()を実行してください。"
+            )
+
+        # 温泉回答に特化したカスタムプロンプト
+        # 参考情報のみ使用・推測禁止・根拠明示・回答形式を指示
+        template = """
+この情報の内容に基づいて質問に答えてください。
+推測や記載のない情報は答えないでください。
+
+【参考情報】
+{context}
+
+【質問】
+{question}
+
+【厳守事項】
+・参考情報に含まれない事実や一般知識を使用しない
+・推測や想像は行わない
+・参考情報から判断できない場合は「参考情報からは分かりません」と回答する
+・回答は簡潔で分かりやすい日本語にする
+
+【回答形式】
+・結論を最初に述べる
+・必要に応じて箇条書きを使用
+・根拠となる参考情報の要点を明示する
+
+【回答】
+"""
+
+        prompt = PromptTemplate(
+            template=template,
+            input_variables=["context", "question"]
+        )
+
+        # QAチェーン作成と実行
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            chain_type="stuff",
+            retriever=self.vectorstore.as_retriever(
+                search_kwargs={"k": k}
+            ),
+            chain_type_kwargs={"prompt": prompt},
+            return_source_documents=True
+        )
+
+        result = qa_chain({"query": question})
+        return result
+
+    def search_chunks(self, question: str, k: int = 3) -> list:
+        """
+        質問に対してどのチャンクが検索されるかを確認（評価用）
+
+        RAGの精度を確認するために使用する。
+        LLMの回答生成は行わず、検索結果のみを返す。
+
+        Args:
+            question: 検索クエリ
+            k: 取得件数
+
+        Returns:
+            list: 検索結果のDocumentリスト
+        """
+        if self.vectorstore is None:
+            raise ValueError("データが未読み込みです。")
+
+        retriever = self.vectorstore.as_retriever(
+            search_kwargs={"k": k}
+        )
+        results = retriever.invoke(question)
+
+        print(f"\n[SEARCH] Question: 「{question}」")
+        print(f"   検索結果: {len(results)}件")
+        for i, doc in enumerate(results):
+            content = doc.page_content.replace("\n", " ")
+            preview = content[:100] + "..." \
+                if len(content) > 100 else content
+            print(f"  [{i+1}] {preview}")
+
+        return results
+
+    def evaluate(self, questions_path: str = None) -> list:
+        """
+        サンプル質問を使ってRAGの精度を一括評価
+
+        data/sample_questions.json の質問を順番に実行し、
+        検索されたチャンクと期待されるチャンクを比較する。
+
+        Args:
+            questions_path: 質問ファイルのパス（省略時はデフォルト）
+
+        Returns:
+            list: 評価結果のリスト
+        """
+        if self.vectorstore is None:
+            raise ValueError("データが未読み込みです。")
+
+        file_path = questions_path or DEFAULT_QUESTIONS_PATH
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        results = []
+        print("=" * 60)
+        print("RAG Evaluation")
+        print("=" * 60)
+
+        for q in data["questions"]:
+            question = q["question"]
+            expected = q["expected_chunk"]
+            keywords = q["expected_answer_keywords"]
+
+            # 検索実行
+            docs = self.search_chunks(question, k=3)
+
+            # キーワードが検索結果に含まれているか確認
+            all_text = " ".join([d.page_content for d in docs])
+            matched_keywords = [
+                kw for kw in keywords if kw in all_text
+            ]
+            # マッチ率を計算（0.0〜1.0）
+            match_rate = len(matched_keywords) / len(keywords) \
+                if keywords else 0.0
+
+            # 結果を判定（cp932対応で絵文字を避ける）
+            status = "[OK]" if match_rate >= 0.5 else "[WARN]" \
+                if match_rate > 0 else "[BAD]"
+
+            print(f"   {status} キーワード一致率: {match_rate:.0%} "
+                  f"({len(matched_keywords)}/{len(keywords)})")
+            print(f"   期待チャンク: {expected}")
+            print()
+
+            results.append({
+                "question": question,
+                "expected_chunk": expected,
+                "match_rate": match_rate,
+                "matched_keywords": matched_keywords,
+                "status": status
+            })
+
+        # サマリー表示
+        total = len(results)
+        good = sum(1 for r in results if r["status"] == "[OK]")
+        warn = sum(1 for r in results if r["status"] == "[WARN]")
+        bad = sum(1 for r in results if r["status"] == "[BAD]")
+
+        print("=" * 60)
+        print(f"Summary: OK={good} / WARN={warn} / BAD={bad} "
+              f"（全{total}問）")
+        print("=" * 60)
+
+        return results

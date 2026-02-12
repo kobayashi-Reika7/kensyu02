@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>♨️ 温泉相談チャット - OnsenRAG</title>
+    <style>
+        /* ============================================
+           温泉相談チャットUI - スタイルシート
+           温泉の和風テーマでデザイン
+           ============================================ */
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif;
+            background: linear-gradient(135deg, #fef9e7 0%, #fdebd0 50%, #f5cba7 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 700px;
+            width: 100%;
+            margin-top: 20px;
+        }
+
+        /* ヘッダー部分 */
+        .header {
+            text-align: center;
+            margin-bottom: 24px;
+        }
+
+        .header h1 {
+            font-size: 1.8rem;
+            color: #6c3483;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            color: #7f8c8d;
+            font-size: 0.9rem;
+        }
+
+        /* チャット表示エリア */
+        .chat-area {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            padding: 24px;
+            margin-bottom: 16px;
+            min-height: 300px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        /* メッセージ吹き出し */
+        .message {
+            margin-bottom: 16px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .message.user {
+            align-items: flex-end;
+        }
+
+        .message.assistant {
+            align-items: flex-start;
+        }
+
+        .message-label {
+            font-size: 0.75rem;
+            color: #95a5a6;
+            margin-bottom: 4px;
+            padding: 0 8px;
+        }
+
+        .message-bubble {
+            padding: 12px 18px;
+            border-radius: 16px;
+            max-width: 85%;
+            line-height: 1.6;
+            font-size: 0.95rem;
+            white-space: pre-wrap;
+        }
+
+        .message.user .message-bubble {
+            background: #6c3483;
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.assistant .message-bubble {
+            background: #f8f9fa;
+            color: #2c3e50;
+            border: 1px solid #e9ecef;
+            border-bottom-left-radius: 4px;
+        }
+
+        /* 参照ソース表示 */
+        .sources {
+            margin-top: 8px;
+            max-width: 85%;
+        }
+
+        .sources-toggle {
+            background: none;
+            border: none;
+            color: #6c3483;
+            cursor: pointer;
+            font-size: 0.8rem;
+            padding: 4px 0;
+            text-decoration: underline;
+        }
+
+        .sources-list {
+            display: none;
+            margin-top: 4px;
+        }
+
+        .sources-list.open {
+            display: block;
+        }
+
+        .source-item {
+            background: #fff8e1;
+            border-left: 3px solid #f39c12;
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            font-size: 0.8rem;
+            color: #666;
+            border-radius: 0 8px 8px 0;
+            line-height: 1.4;
+        }
+
+        /* 入力エリア */
+        .input-area {
+            display: flex;
+            gap: 10px;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            padding: 12px 16px;
+        }
+
+        .input-area input {
+            flex: 1;
+            border: 2px solid #e9ecef;
+            border-radius: 12px;
+            padding: 12px 16px;
+            font-size: 1rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .input-area input:focus {
+            border-color: #6c3483;
+        }
+
+        .input-area input::placeholder {
+            color: #bdc3c7;
+        }
+
+        .input-area button {
+            background: #6c3483;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            padding: 12px 24px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.2s;
+            white-space: nowrap;
+        }
+
+        .input-area button:hover {
+            background: #8e44ad;
+        }
+
+        .input-area button:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+        }
+
+        /* ローディング表示 */
+        .loading {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #95a5a6;
+            font-size: 0.9rem;
+            padding: 12px 18px;
+        }
+
+        .loading-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .loading-dots span {
+            width: 8px;
+            height: 8px;
+            background: #6c3483;
+            border-radius: 50%;
+            animation: bounce 1.4s infinite both;
+        }
+
+        .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        /* サンプル質問ボタン */
+        .sample-questions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 12px;
+            justify-content: center;
+        }
+
+        .sample-btn {
+            background: white;
+            border: 1px solid #d5d8dc;
+            border-radius: 20px;
+            padding: 6px 14px;
+            font-size: 0.8rem;
+            color: #6c3483;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .sample-btn:hover {
+            background: #6c3483;
+            color: white;
+            border-color: #6c3483;
+        }
+
+        /* 初期メッセージ */
+        .welcome {
+            text-align: center;
+            color: #95a5a6;
+            padding: 40px 20px;
+        }
+
+        .welcome-icon {
+            font-size: 3rem;
+            margin-bottom: 12px;
+        }
+
+        /* エラー表示 */
+        .error-bubble {
+            background: #fdf2f2 !important;
+            border: 1px solid #f5b7b1 !important;
+            color: #c0392b !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- ヘッダー -->
+        <div class="header">
+            <h1>♨️ 温泉相談チャット</h1>
+            <p>温泉に関する質問にRAGシステムがお答えします</p>
+        </div>
+
+        <!-- チャット表示エリア -->
+        <div class="chat-area" id="chatArea">
+            <div class="welcome">
+                <div class="welcome-icon">♨️</div>
+                <p>温泉について質問してみましょう！</p>
+                <p style="font-size: 0.8rem; margin-top: 8px;">
+                    例: 「冬におすすめの温泉地は？」「美肌の湯とは？」
+                </p>
+            </div>
+        </div>
+
+        <!-- 入力エリア -->
+        <div class="input-area">
+            <input
+                type="text"
+                id="questionInput"
+                placeholder="温泉について質問を入力..."
+                onkeydown="if(event.key==='Enter') askQuestion()"
+            />
+            <button id="askBtn" onclick="askQuestion()">質問する</button>
+        </div>
+
+        <!-- サンプル質問ボタン -->
+        <div class="sample-questions">
+            <button class="sample-btn" onclick="setQuestion('温泉とは何ですか？')">温泉とは？</button>
+            <button class="sample-btn" onclick="setQuestion('美肌の湯と呼ばれる泉質は？')">美肌の湯は？</button>
+            <button class="sample-btn" onclick="setQuestion('冬におすすめの温泉地は？')">冬のおすすめ</button>
+            <button class="sample-btn" onclick="setQuestion('東京から行きやすい温泉地は？')">東京から近い</button>
+            <button class="sample-btn" onclick="setQuestion('温泉の基本マナーを教えてください')">マナー</button>
+            <button class="sample-btn" onclick="setQuestion('刺激が少ない温泉はどれですか？')">刺激が少ない</button>
+        </div>
+    </div>
+
+    <script>
+        // ============================================
+        // 温泉相談チャット - クライアントサイドロジック
+        // ============================================
+
+        // APIのベースURL（FastAPIサーバー）
+        const API_BASE = "http://localhost:8000";
+
+        // チャットエリアの要素を取得
+        const chatArea = document.getElementById("chatArea");
+        const questionInput = document.getElementById("questionInput");
+        const askBtn = document.getElementById("askBtn");
+
+        // 初回かどうかのフラグ（ウェルカムメッセージ削除用）
+        let isFirstMessage = true;
+
+        /**
+         * サンプル質問ボタンから質問を設定
+         * @param {string} question - 設定する質問文
+         */
+        function setQuestion(question) {
+            questionInput.value = question;
+            questionInput.focus();
+        }
+
+        /**
+         * メッセージをチャットエリアに追加
+         * @param {string} text - メッセージテキスト
+         * @param {string} role - "user" または "assistant"
+         * @param {string[]} sources - 参照ソースの配列（assistant時のみ）
+         * @param {boolean} isError - エラーメッセージかどうか
+         */
+        function addMessage(text, role, sources = [], isError = false) {
+            // 初回メッセージ時にウェルカム画面を削除
+            if (isFirstMessage) {
+                chatArea.innerHTML = "";
+                isFirstMessage = false;
+            }
+
+            const messageDiv = document.createElement("div");
+            messageDiv.className = `message ${role}`;
+
+            // ラベル（あなた / アシスタント）
+            const label = document.createElement("div");
+            label.className = "message-label";
+            label.textContent = role === "user" ? "あなた" : "♨️ アシスタント";
+
+            // 吹き出し
+            const bubble = document.createElement("div");
+            bubble.className = `message-bubble ${isError ? "error-bubble" : ""}`;
+            bubble.textContent = text;
+
+            messageDiv.appendChild(label);
+            messageDiv.appendChild(bubble);
+
+            // 参照ソースがある場合は折りたたみで表示
+            if (sources.length > 0) {
+                const sourcesDiv = document.createElement("div");
+                sourcesDiv.className = "sources";
+
+                const toggle = document.createElement("button");
+                toggle.className = "sources-toggle";
+                toggle.textContent = "📄 参照ソースを表示";
+                toggle.onclick = function () {
+                    const list = this.nextElementSibling;
+                    list.classList.toggle("open");
+                    this.textContent = list.classList.contains("open")
+                        ? "📄 参照ソースを隠す"
+                        : "📄 参照ソースを表示";
+                };
+
+                const list = document.createElement("div");
+                list.className = "sources-list";
+
+                sources.forEach((src, i) => {
+                    const item = document.createElement("div");
+                    item.className = "source-item";
+                    item.textContent = `[${i + 1}] ${src}`;
+                    list.appendChild(item);
+                });
+
+                sourcesDiv.appendChild(toggle);
+                sourcesDiv.appendChild(list);
+                messageDiv.appendChild(sourcesDiv);
+            }
+
+            chatArea.appendChild(messageDiv);
+
+            // 最新メッセージにスクロール
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        /**
+         * ローディング表示を追加・削除
+         * @param {boolean} show - 表示するかどうか
+         */
+        function setLoading(show) {
+            // 既存のローディングを削除
+            const existing = document.querySelector(".loading");
+            if (existing) existing.remove();
+
+            if (show) {
+                const loading = document.createElement("div");
+                loading.className = "loading";
+                loading.innerHTML = `
+                    <div class="loading-dots">
+                        <span></span><span></span><span></span>
+                    </div>
+                    回答を生成中...
+                `;
+                chatArea.appendChild(loading);
+                chatArea.scrollTop = chatArea.scrollHeight;
+            }
+        }
+
+        /**
+         * 質問を送信してRAGで回答を取得
+         *
+         * 処理の流れ：
+         * 1. ユーザーの質問をチャットに表示
+         * 2. APIに質問を送信
+         * 3. 回答と参照ソースをチャットに表示
+         */
+        async function askQuestion() {
+            const question = questionInput.value.trim();
+            if (!question) return;
+
+            // 入力欄をクリアしてボタンを無効化
+            questionInput.value = "";
+            askBtn.disabled = true;
+
+            // ユーザーメッセージを表示
+            addMessage(question, "user");
+
+            // ローディング表示
+            setLoading(true);
+
+            try {
+                // FastAPI にPOSTリクエスト
+                const response = await fetch(`${API_BASE}/api/ask`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ question }),
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || "APIエラー");
+                }
+
+                const data = await response.json();
+
+                // ローディング削除して回答を表示
+                setLoading(false);
+                addMessage(data.answer, "assistant", data.sources);
+
+            } catch (error) {
+                setLoading(false);
+
+                // エラーメッセージを表示
+                let errorMsg = "回答の取得に失敗しました。";
+                if (error.message.includes("Failed to fetch")) {
+                    errorMsg += "\nAPIサーバーが起動していない可能性があります。"
+                        + "\n→ uvicorn api.main:app --reload --port 8000";
+                } else {
+                    errorMsg += `\n${error.message}`;
+                }
+                addMessage(errorMsg, "assistant", [], true);
+            }
+
+            // ボタンを再有効化
+            askBtn.disabled = false;
+            questionInput.focus();
+        }
+    </script>
+</body>
+</html>
