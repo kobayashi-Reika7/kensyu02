@@ -16,6 +16,7 @@ RAG教材としてのポイント：
 """
 
 import os
+import re
 import json
 import hashlib
 import time
@@ -174,6 +175,10 @@ class OnsenRAG:
         self._query_cache: OrderedDict = OrderedDict()
         self._cache_maxsize = 128
         self._cache_ttl = 300  # 5分
+
+        # 会話コンテキスト: 直前のクエリで検出された温泉地を保持
+        # 「有馬」→「カフェ」のような文脈継続に使用
+        self._last_location: str | None = None
 
         # LLMの初期化（共通ファクトリ経由: Gemini → Groq → OpenAI）
         from src.llm_factory import create_llm
@@ -704,9 +709,9 @@ kusatsu_015:3
         return results
 
     # 信頼度閾値: CrossEncoderスコアがこの値未満の候補は除外
-    # mMARCOモデルは0〜1のスコアを返す（旧モデルは-11〜+11程度）
-    # 0.01未満は「まったく関連なし」と判断
-    CONFIDENCE_THRESHOLD = 0.01
+    # mMARCOモデルはlogitを出力（範囲: 約-10〜+10）
+    # -3.0未満は「ほぼ無関連」と判断（短いクエリでも上位候補を残す）
+    CONFIDENCE_THRESHOLD = -3.0
 
     def _final_selection(
         self,
@@ -802,6 +807,14 @@ kusatsu_015:3
         # 温泉地名を検出してフィルタリング条件を決定
         location = self._detect_location(question)
 
+        # 会話コンテキスト: 温泉地が検出されなかった場合、直前の温泉地を引き継ぐ
+        # 例:「有馬」→「カフェ」と続けて聞いた場合、「カフェ」を有馬コンテキストで検索
+        if location:
+            self._last_location = location
+        elif self._last_location:
+            location = self._last_location
+            print(f"[CONTEXT] 温泉地未検出 → 直前のコンテキスト継続: {location}")
+
         # 初期検索は多めに取得（後段で絞るため）
         search_k = self.initial_k
 
@@ -895,31 +908,24 @@ kusatsu_015:3
 
         return final_results
 
-    # RAG専用プロンプトテンプレート（チャンクID付き・根拠明示形式）
+    # RAG専用プロンプトテンプレート（文脈ベース・チャンクID非表示）
     PROMPT_TEMPLATE = """あなたはRAGシステム専用の日本語質問応答アシスタントです。
-以下の【検索結果】に含まれる情報のみを使用して【質問】に回答してください。
+以下の【文脈】は、検索によって取得された関連性の高い上位3件の情報です。
 
 【厳守ルール】
-- 検索結果に含まれない情報は一切使用しない
-- 推測・一般論・補足説明は禁止
-- 不明な場合は必ず「該当情報なし」と回答する
-- 回答は指定フォーマットを厳守する
-- 最大300トークン以内で出力する
+- 必ず【文脈】に含まれる事実のみを使用して回答してください
+- 文脈に書かれていない内容を推測・補完・一般知識で補わないでください
+- 分からない場合は「文脈内に該当情報がないため分かりません」と回答してください
+- 根拠となるチャンクID・参照ソース・文書名は一切表示しないでください
+- 回答は簡潔で分かりやすい日本語にしてください
 
-【検索結果】（チャンクID付き）
+【文脈】
 {context}
 
 【質問】
 {question}
 
-【回答フォーマット】
-回答:
-- （簡潔な回答を箇条書きで最大5項目）
-  ※ 各項目は2行以内
-
-根拠チャンクID:
-- chunk_id_1
-- chunk_id_2
+【回答】
 """
 
     def _cache_key(self, question: str, k: int) -> str:
@@ -948,6 +954,21 @@ kusatsu_015:3
             "result": result,
             "timestamp": time.time(),
         }
+
+    @staticmethod
+    def _strip_chunk_ids(text: str) -> str:
+        """
+        LLM回答から「根拠チャンクID:」セクションを除去する。
+
+        プロンプトでチャンクID非表示を指示しているが、LLMが従わない場合の
+        フォールバック処理。「根拠チャンクID:」以降の行を全て削除する。
+        """
+        # 「根拠チャンクID」「参照チャンク」等のヘッダー以降を除去
+        text = re.split(
+            r'\n*(?:根拠チャンクID|根拠チャンク|参照チャンクID|参照ソース|chunk_id)\s*[:：]',
+            text,
+        )[0]
+        return text.strip()
 
     def query(self, question: str, k: int = 3) -> dict:
         """
@@ -978,20 +999,19 @@ kusatsu_015:3
         # ハイブリッド検索（セマンティック + BM25キーワード + 温泉地フィルタ）
         docs = self._hybrid_search(question, k=k)
 
-        # チャンクID付きでコンテキストを構築
+        # コンテキストを構築（チャンクIDはLLMに渡さず、API応答用に内部追跡）
         context_parts = []
         chunk_ids = []
         for doc in docs:
             cid = doc.metadata.get("chunk_id", "")
             if not cid and "source" in doc.metadata:
-                # テキスト由来のチャンクは source を ID 代わりに
                 cid = doc.metadata.get("source", "unknown").replace(".", "_")
             if not cid:
                 cid = f"doc_{len(context_parts) + 1}"
             chunk_ids.append(cid)
-            context_parts.append(f"chunk_id: {cid}\n{doc.page_content}")
+            context_parts.append(doc.page_content)
 
-        context = "\n\n".join(context_parts) if context_parts else "（検索結果なし）"
+        context = "\n\n---\n\n".join(context_parts) if context_parts else "（該当する文脈なし）"
 
         prompt = PromptTemplate(
             template=self.PROMPT_TEMPLATE,
@@ -1001,6 +1021,9 @@ kusatsu_015:3
 
         response = chain.invoke({"context": context, "question": question})
         answer = response.content if hasattr(response, "content") else str(response)
+
+        # LLMがプロンプト指示に従わずチャンクIDを出力した場合に除去
+        answer = self._strip_chunk_ids(answer)
 
         result = {
             "result": answer.strip(),

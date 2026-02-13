@@ -86,17 +86,45 @@
 from src.onsen_rag import OnsenRAG
 
 rag = OnsenRAG()
-rag.load_data()
-results = rag.evaluate()
+rag.load_from_data_folder()  # 全データを読み込み
+results = rag.evaluate()     # 14問の自動評価
 ```
 
 ### API経由で検索精度を確認
 
 ```bash
+# 検索結果のみ確認（LLM回答なし・高速）
 curl -X POST http://localhost:8000/api/search \
   -H "Content-Type: application/json" \
   -d '{"question": "冬におすすめの温泉地は？"}'
+
+# 完全な回答を取得
+curl -X POST http://localhost:8000/api/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "冬におすすめの温泉地は？"}'
 ```
+
+---
+
+## 検索パイプラインの精度確認
+
+OnsenRAG の3段階パイプラインでは、各段階のログが出力されます:
+
+```
+[STEP1] 類似度検索 location=kusatsu | semantic=10件 + BM25=10件 → RRF統合=15件
+[RERANK] 15件をCrossEncoderでスコアリング → 15件
+  [1] CE_score=2.3456 chunk_id=kusatsu_042
+  [2] CE_score=1.8901 chunk_id=kusatsu_015
+[LLM_EXTRACT] 15件 → LLM評価で上位5件を抽出
+  [1] LLM=9/10 CE=2.3456 chunk_id=kusatsu_042
+[FINAL] スコア統合（CE×0.4 + LLM×0.6）→ 上位3件を最終選定
+```
+
+各段階で精度を確認できるポイント:
+- **Step 1**: 温泉地フィルタが正しく効いているか
+- **Re-rank**: CrossEncoderスコアが高い候補が上位に来ているか
+- **LLM抽出**: LLMが質問の意図を理解し、関連度の高い候補を選んでいるか
+- **最終選定**: 信頼度閾値で低品質候補が除外されているか
 
 ---
 
@@ -104,14 +132,14 @@ curl -X POST http://localhost:8000/api/search \
 
 | チャンクサイズ | メリット | デメリット |
 |---------------|---------|-----------|
-| 小さい（100-300） | ピンポイントな情報取得 | 文脈が不足する場合がある |
-| 中くらい（300-500） | バランスが良い | - |
-| 大きい（500-1000） | 文脈が豊富 | ノイズが混入しやすい |
+| 小さい（100-300 tokens） | ピンポイントな情報取得 | 文脈が不足する場合がある |
+| 中くらい（400-600 tokens） | バランスが良い | - |
+| 大きい（700-1000 tokens） | 文脈が豊富 | ノイズが混入しやすい |
 
-### OnsenRAGの推奨設定
+### OnsenRAGの設定
 
-- **chunk_size: 450 tokens** （400〜500推奨、LLMのコンテキスト制限に合わせた管理）
-- **chunk_overlap: 75 tokens** （50〜100、10〜20%推奨、段落間の接続を保持）
+- **chunk_size: 600 tokens** （generalプリセット）
+- **chunk_overlap: 75 tokens** （12.5%、段落間の接続を保持）
 
 ---
 
