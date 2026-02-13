@@ -56,6 +56,16 @@ DEFAULT_JSON_CHUNK_PATHS = [
 DEFAULT_TXT_PATHS = []
 
 
+# 温泉地名 → chunk_idプレフィックスの対応表
+# 質問文に含まれるキーワードで、どの温泉地のチャンクを検索するか判定する
+LOCATION_KEYWORDS = {
+    "kusatsu": ["草津"],
+    "hakone": ["箱根"],
+    "beppu": ["別府"],
+    "arima": ["有馬"],
+}
+
+
 class OnsenRAG:
     """
     温泉情報に特化したRAGシステム
@@ -271,13 +281,17 @@ class OnsenRAG:
             meta = chunk.get("metadata", {})
             tags_raw = meta.get("tags") or meta.get("keywords", [])
             tags_str = _to_str(tags_raw) if tags_raw else ""
+            # chunk_idプレフィックスを location メタデータとして格納
+            chunk_id = chunk.get("chunk_id", "")
+            location = chunk_id.split("_")[0] if chunk_id else "unknown"
             doc_metadata = {
-                "chunk_id": chunk.get("chunk_id", ""),
+                "chunk_id": chunk_id,
                 "source": meta.get("source", ""),
                 "category": _to_str(meta.get("category", "")),
                 "section": chunk.get("section", ""),
                 "area": _to_str(meta.get("area", "")),
                 "tags": tags_str,
+                "location": location,
             }
             doc = Document(
                 page_content=chunk.get("content", ""),
@@ -349,13 +363,19 @@ class OnsenRAG:
                 meta = chunk.get("metadata", {})
                 tags_raw = meta.get("tags") or meta.get("keywords", [])
                 tags_str = _to_str(tags_raw) if tags_raw else ""
+                # chunk_idのプレフィックス（"_"より前）を location として格納
+                # 例: "kusatsu_001" → "kusatsu", "arima_010" → "arima"
+                # フィルタリング検索で温泉地ごとの絞り込みに使用する
+                chunk_id = chunk.get("chunk_id", "")
+                location = chunk_id.split("_")[0] if chunk_id else "unknown"
                 doc_metadata = {
-                    "chunk_id": chunk.get("chunk_id", ""),
+                    "chunk_id": chunk_id,
                     "source": meta.get("source", os.path.basename(file_path)),
                     "category": _to_str(meta.get("category", "")),
                     "section": chunk.get("section", ""),
                     "area": _to_str(meta.get("area", "")),
                     "tags": tags_str,
+                    "location": location,
                 }
                 doc = Document(
                     page_content=chunk.get("content", ""),
@@ -375,6 +395,35 @@ class OnsenRAG:
             embedding=self.embeddings,
         )
         print(f"[OK] Total {len(all_documents)} chunks loaded into Vector DB")
+
+    def _detect_location(self, question: str) -> str | None:
+        """
+        質問文から温泉地名を検出し、対応するchunk_idプレフィックスを返す。
+
+        なぜ必要か：
+        - 「草津のカフェ」と聞いたのに有馬のチャンクが混ざる問題を防ぐ
+        - 検出された温泉地のチャンクのみに絞り込むことで検索精度が向上する
+
+        判定ロジック：
+        - 1つの温泉地名だけ検出 → その温泉地でフィルタリング
+        - 複数検出 or 検出なし → フィルタリングなし（全チャンクから検索）
+
+        Args:
+            question: ユーザーの質問文
+
+        Returns:
+            str: 温泉地のプレフィックス（例: "kusatsu"）。検出なしはNone
+        """
+        detected = []
+        for location, keywords in LOCATION_KEYWORDS.items():
+            if any(kw in question for kw in keywords):
+                detected.append(location)
+
+        # 1つだけ検出された場合のみフィルタリング
+        # 複数検出時はどちらも必要な可能性があるためフィルタなし
+        if len(detected) == 1:
+            return detected[0]
+        return None
 
     # RAG専用プロンプトテンプレート（チャンクID付き・根拠明示形式）
     PROMPT_TEMPLATE = """あなたはRAGシステム専用の日本語質問応答アシスタントです。
@@ -423,7 +472,21 @@ class OnsenRAG:
                 "データが未読み込みです。先にload_data()を実行してください。"
             )
 
-        retriever = self.vectorstore.as_retriever(search_kwargs={"k": k})
+        # 質問文から温泉地名を検出し、該当チャンクのみに絞り込む
+        # 例: "草津のカフェ" → location="kusatsu" → kusatsu_* + onsen_knowledge_* のみ検索
+        location = self._detect_location(question)
+        search_kwargs = {"k": k}
+        if location:
+            # 検出された温泉地 + 温泉基礎知識（onsen）の両方を検索対象にする
+            search_kwargs["filter"] = {
+                "$or": [
+                    {"location": {"$eq": location}},
+                    {"location": {"$eq": "onsen"}},
+                ]
+            }
+            print(f"[FILTER] location={location} で絞り込み検索")
+
+        retriever = self.vectorstore.as_retriever(search_kwargs=search_kwargs)
         docs = retriever.invoke(question)
 
         # チャンクID付きでコンテキストを構築
@@ -473,8 +536,19 @@ class OnsenRAG:
         if self.vectorstore is None:
             raise ValueError("データが未読み込みです。")
 
+        # query と同じ温泉地フィルタリングを適用
+        location = self._detect_location(question)
+        search_kwargs = {"k": k}
+        if location:
+            search_kwargs["filter"] = {
+                "$or": [
+                    {"location": {"$eq": location}},
+                    {"location": {"$eq": "onsen"}},
+                ]
+            }
+
         retriever = self.vectorstore.as_retriever(
-            search_kwargs={"k": k}
+            search_kwargs=search_kwargs
         )
         results = retriever.invoke(question)
 
